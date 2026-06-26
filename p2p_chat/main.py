@@ -1,7 +1,7 @@
 import threading
 from discovery import Discovery
 
-from peer import Peer
+from connection import Peer
 
 
 def main():
@@ -38,13 +38,26 @@ def main():
     print("\nYou can now write messages.")
     print("Type 'exit' to stop.\n")
 
-    while True:
-        text = input()
+    try:
+        while True:
+            text = input("> ")
 
-        if text.lower() == "exit":
-            break
+            if text.lower() == "exit":
+                break
 
-        peer.send_message(text)
+            peer.send_message(text)
+
+    except KeyboardInterrupt:
+        print("\n[SHUTDOWN] Ctrl+C received.")
+
+    finally:
+        if hasattr(discovery, "stop"):
+            discovery.stop()
+
+        if hasattr(peer, "stop"):
+            peer.stop()
+
+        print("[SHUTDOWN] Peer stopped successfully.")
 
 
 if __name__ == "__main__":
