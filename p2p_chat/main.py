@@ -1,4 +1,5 @@
 import threading
+from discovery import Discovery
 
 from peer import Peer
 
@@ -14,17 +15,25 @@ def main():
     )
 
     listener_thread = threading.Thread(
+
         target=peer.start_listener,
+
         daemon=True
+
     )
+
     listener_thread.start()
 
-    connect = input("Connect to another peer? y/n: ")
+    discovery = Discovery(peer)
 
-    if connect.lower() == "y":
-        peer_host = input("Peer host: ")
-        peer_port = int(input("Peer port: "))
-        peer.connect_to_peer(peer_host, peer_port)
+    discovery.start()
+
+    #connect = input("Connect to another peer? y/n: ")
+
+    #if connect.lower() == "y":
+        #peer_host = input("Peer host: ")
+        #peer_port = int(input("Peer port: "))
+        #peer.connect_to_peer(peer_host, peer_port)
 
     print("\nYou can now write messages.")
     print("Type 'exit' to stop.\n")

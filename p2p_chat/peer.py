@@ -70,6 +70,8 @@ class Peer:
 
         self.connections = []
 
+        self.known_peers = set()
+
     def start_listener(self):
 
         # Inspired by simpleserver.py
@@ -113,29 +115,41 @@ class Peer:
 
     def connect_to_peer(self, peer_host, peer_port):
 
-        # Inspired by simpleclient.py
+        peer_address = (peer_host, int(peer_port))
 
-        # Difference: TCP connect instead of UDP sendto
+        if peer_address in self.known_peers:
+            return
 
-        peer_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        if peer_host == self.host and int(peer_port) == self.port:
+            return
 
-        peer_socket.connect((peer_host, peer_port))
+        try:
 
-        self.connections.append(peer_socket)
+            peer_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 
-        print(f"[CONNECTED] Connected to peer {peer_host}:{peer_port}")
+            peer_socket.connect(peer_address)
 
-        thread = threading.Thread(
+            self.connections.append(peer_socket)
 
-            target=self.handle_connection,
+            self.known_peers.add(peer_address)
 
-            args=(peer_socket,),
+            print(f"[CONNECTED] Connected to peer {peer_host}:{peer_port}")
 
-            daemon=True
+            thread = threading.Thread(
 
-        )
+                target=self.handle_connection,
 
-        thread.start()
+                args=(peer_socket,),
+
+                daemon=True
+
+            )
+
+            thread.start()
+
+        except Exception as error:
+
+            print(f"[ERROR] Could not connect to peer {peer_host}:{peer_port}: {error}")
 
     def handle_connection(self, connection):
 
