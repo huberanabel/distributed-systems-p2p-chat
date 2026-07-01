@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import threading
@@ -129,8 +128,6 @@ class BullyElection:
             print("[BULLY ERROR] Invalid ELECTION packet.")
             return
 
-        # The packet was broadcast, but it may target only selected
-        # higher processes.
         if target_ids and self.process_id not in target_ids:
             return
 
@@ -148,8 +145,6 @@ class BullyElection:
             "target_id": sender_id
         })
 
-        # According to the Bully algorithm, the higher process now
-        # starts its own election.
         with self._lock:
             election_running = self.election_in_progress
 
@@ -193,8 +188,6 @@ class BullyElection:
             print("[BULLY ERROR] Invalid COORDINATOR packet.")
             return
 
-        # A process should not accept a lower process as leader,
-        # because it can defeat that process in a Bully election.
         if leader_id < self.process_id:
             print(
                 f"[BULLY] Process {leader_id} cannot be leader "
@@ -294,7 +287,7 @@ class BullyElection:
         """
         Starts a new election after the current leader disconnects.
 
-        connection.py should call this method when it detects that
+        peer.py calls this method when it detects that
         the leader has failed.
         """
 
