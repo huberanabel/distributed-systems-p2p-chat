@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import socket
@@ -8,19 +7,11 @@ from collections.abc import Callable
 from typing import Any
 
 
-HEARTBEAT_INTERVAL = 3.0
-HEARTBEAT_TIMEOUT = 10.0
+HEARTBEAT_INTERVAL = 2.0
+HEARTBEAT_TIMEOUT = 6.0
 
 
 class HeartbeatManager:
-    """
-    Sends heartbeat packets and detects failed peer connections.
-
-    A connection is treated as failed when no packet has been
-    received for HEARTBEAT_TIMEOUT seconds.
-
-    Receiving any packet counts as proof that the peer is alive.
-    """
 
     def __init__(
         self,
@@ -36,13 +27,13 @@ class HeartbeatManager:
         self.timeout = float(timeout)
 
         self._last_seen: dict[socket.socket, float] = {}
+        self._active: dict[socket.socket, bool] = {}
         self._lock = threading.RLock()
 
         self._running = False
         self._monitor_thread: threading.Thread | None = None
 
     def start(self) -> None:
-        """Starts the heartbeat monitoring thread."""
 
         with self._lock:
             if self._running:
@@ -58,40 +49,46 @@ class HeartbeatManager:
 
     def register_connection(
         self,
-        connection: socket.socket
+        connection: socket.socket,
+        active: bool = False
     ) -> None:
-        """Adds a new connection to heartbeat monitoring."""
+
 
         with self._lock:
             self._last_seen[connection] = time.monotonic()
+            self._active[connection] = active
+
+    def set_active(
+        self,
+        connection: socket.socket,
+        active: bool
+    ) -> None:
+
+        with self._lock:
+            if connection not in self._last_seen:
+                self._last_seen[connection] = time.monotonic()
+
+            self._active[connection] = active
 
     def unregister_connection(
         self,
         connection: socket.socket
     ) -> None:
-        """Removes a connection from heartbeat monitoring."""
 
         with self._lock:
             self._last_seen.pop(connection, None)
+            self._active.pop(connection, None)
 
     def mark_alive(
         self,
         connection: socket.socket
     ) -> None:
-        """
-        Updates the last-seen time of a connection.
-
-        This method should be called whenever any packet is received.
-        """
 
         with self._lock:
             if connection in self._last_seen:
                 self._last_seen[connection] = time.monotonic()
 
     def _heartbeat_loop(self) -> None:
-        """
-        Periodically sends heartbeats and checks for timeouts.
-        """
 
         while True:
             time.sleep(self.interval)
@@ -100,11 +97,14 @@ class HeartbeatManager:
                 if not self._running:
                     return
 
-                connections = list(self._last_seen.items())
+                connections = [
+                    (connection, last_seen, self._active.get(connection, False))
+                    for connection, last_seen in self._last_seen.items()
+                ]
 
             current_time = time.monotonic()
 
-            for connection, last_seen in connections:
+            for connection, last_seen, is_active in connections:
                 elapsed_time = current_time - last_seen
 
                 if elapsed_time > self.timeout:
@@ -123,6 +123,9 @@ class HeartbeatManager:
                             f"Timeout handler failed: {error}"
                         )
 
+                    continue
+
+                if not is_active:
                     continue
 
                 try:
@@ -155,9 +158,8 @@ class HeartbeatManager:
                         )
 
     def stop(self) -> None:
-        """Stops heartbeat monitoring."""
 
         with self._lock:
             self._running = False
             self._last_seen.clear()
-
+            self._active.clear()

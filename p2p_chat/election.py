@@ -9,30 +9,23 @@ COORDINATOR_TIMEOUT = 5.0
 
 
 class BullyElection:
-    """
-    Implementation of the Bully leader-election algorithm.
-
-    Rules:
-    - Every peer has a unique integer process ID.
-    - The active peer with the highest process ID becomes leader.
-    - ELECTION is sent to peers with higher IDs.
-    - Higher peers answer with OK.
-    - The winner sends a COORDINATOR message to all peers.
-    """
 
     def __init__(
         self,
         process_id: int,
         get_members: Callable[[], set[int]],
-        broadcast_packet: Callable[[dict], None]
+        broadcast_packet: Callable[[dict], None],
+        on_leader_change: Callable[[int], None] | None = None
     ):
         self.process_id = int(process_id)
 
-        # Returns the IDs of all currently known peers.
+
         self.get_members = get_members
 
-        # Sends one control packet to all connected peers.
         self.broadcast_packet = broadcast_packet
+
+
+        self.on_leader_change = on_leader_change
 
         self.leader_id: int | None = None
         self.election_in_progress = False
@@ -44,12 +37,7 @@ class BullyElection:
         self._election_generation = 0
 
     def start_election(self) -> None:
-        """
-        Starts a new Bully election.
 
-        The peer contacts all known peers with a higher process ID.
-        If no higher peer exists, this peer becomes the leader.
-        """
 
         with self._lock:
             if self.election_in_progress:
@@ -94,9 +82,7 @@ class BullyElection:
         waiting_thread.start()
 
     def handle_packet(self, packet: dict) -> None:
-        """
-        Handles one incoming election-control packet.
-        """
+
 
         packet_type = packet.get("type")
 
@@ -110,11 +96,7 @@ class BullyElection:
             self._handle_coordinator(packet)
 
     def _handle_election(self, packet: dict) -> None:
-        """
-        Handles an ELECTION message from a lower process.
 
-        A higher process answers with OK and starts its own election.
-        """
 
         try:
             sender_id = int(packet["sender_id"])
@@ -152,9 +134,7 @@ class BullyElection:
             self.start_election()
 
     def _handle_ok(self, packet: dict) -> None:
-        """
-        Handles an OK response from a higher process.
-        """
+
 
         try:
             sender_id = int(packet["sender_id"])
@@ -177,9 +157,7 @@ class BullyElection:
         self._ok_received.set()
 
     def _handle_coordinator(self, packet: dict) -> None:
-        """
-        Handles the announcement of the new leader.
-        """
+
 
         try:
             leader_id = int(packet["leader_id"])
@@ -210,16 +188,10 @@ class BullyElection:
             f"[BULLY] Process {leader_id} is the new leader."
         )
 
+        self._notify_leader_change(leader_id)
+
     def _wait_for_result(self, generation: int) -> None:
-        """
-        Waits for answers from higher processes.
 
-        No OK received:
-            this process becomes leader.
-
-        OK received:
-            wait for a COORDINATOR message.
-        """
 
         ok_received = self._ok_received.wait(
             ELECTION_TIMEOUT
@@ -261,9 +233,7 @@ class BullyElection:
         self.start_election()
 
     def _become_leader(self, generation: int) -> None:
-        """
-        Marks this process as leader and announces the result.
-        """
+
 
         with self._lock:
             if generation != self._election_generation:
@@ -283,13 +253,9 @@ class BullyElection:
             "leader_id": self.process_id
         })
 
-    def handle_leader_failure(self) -> None:
-        """
-        Starts a new election after the current leader disconnects.
+        self._notify_leader_change(self.process_id)
 
-        peer.py calls this method when it detects that
-        the leader has failed.
-        """
+    def handle_leader_failure(self) -> None:
 
         with self._lock:
             failed_leader = self.leader_id
@@ -303,10 +269,38 @@ class BullyElection:
 
         self.start_election()
 
+    def set_leader(self, leader_id: int) -> None:
+
+
+        with self._lock:
+            if self.leader_id == leader_id:
+                return
+
+            self.leader_id = leader_id
+            self.election_in_progress = False
+            self._coordinator_received.set()
+
+        print(
+            f"[BULLY] Adopting process {leader_id} as leader "
+            f"(learned from peer list)."
+        )
+
+        self._notify_leader_change(leader_id)
+
     def get_leader(self) -> int | None:
-        """
-        Returns the currently known leader ID.
-        """
+
 
         with self._lock:
             return self.leader_id
+
+    def _notify_leader_change(self, leader_id: int) -> None:
+        if self.on_leader_change is None:
+            return
+
+        try:
+            self.on_leader_change(leader_id)
+        except Exception as error:
+            print(
+                f"[BULLY ERROR] on_leader_change callback failed: "
+                f"{error}"
+            )

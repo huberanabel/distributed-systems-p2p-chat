@@ -21,31 +21,52 @@ class Discovery:
             target=self.listen,
             daemon=True
         )
-
         listener_thread.start()
 
         announcement_thread = threading.Thread(
             target=self.announce_loop,
             daemon=True
         )
-
         announcement_thread.start()
 
     def announce_loop(self):
+        first_attempt = True
+
         while self.running:
+
+            if self.peer.get_leader() is not None:
+                leader_username = self.peer.get_username_for_process_id(
+                    self.peer.get_leader()
+                )
+
+                if leader_username is None:
+                    leader_username = "Unknown"
+
+                print(
+                    f"[DISCOVERY] Leader is known: "
+                    f"{leader_username}. "
+                    f"Stopping discovery announcements."
+                )
+                return
+
             self.send_announcement()
             time.sleep(ANNOUNCEMENT_INTERVAL)
 
+            if first_attempt and self.peer.get_leader() is None:
+                first_attempt = False
+                self.peer.start_election()
+
     def send_announcement(self):
         message = {
-            "type": "DISCOVERY",
-            "username": self.peer.username,
-            "host": self.peer.host,
-            "port": self.peer.port,
+            "type": "DISCOVERY_REQUEST",
             "peer_id": self.peer.peer_id,
+            "username": self.peer.username,
             "process_id": self.peer.process_id
         }
 
+        self._send_broadcast(message)
+
+    def _send_broadcast(self, message):
         announcement_socket = socket.socket(
             socket.AF_INET,
             socket.SOCK_DGRAM
@@ -73,7 +94,7 @@ class Discovery:
             if self.running:
                 print(
                     f"[DISCOVERY ERROR] "
-                    f"Could not send announcement: {error}"
+                    f"Could not send broadcast: {error}"
                 )
 
         finally:
@@ -126,61 +147,14 @@ class Discovery:
                     data.decode("utf-8")
                 )
 
-                if message.get("type") != "DISCOVERY":
-                    continue
+                message_type = message.get("type")
 
-                remote_peer_id = message.get("peer_id")
+                if message_type == "DISCOVERY_REQUEST":
+                    self._handle_discovery_request(message)
 
-                if remote_peer_id == self.peer.peer_id:
-                    continue
+                elif message_type == "DISCOVERY_RESPONSE":
+                    self._handle_discovery_response(message, address)
 
-                remote_username = message["username"]
-                remote_port = int(message["port"])
-                remote_process_id = int(
-                    message["process_id"]
-                )
-
-                # Use the real source IP of the UDP packet.
-                remote_host = address[0]
-
-                # Important for the Bully algorithm.
-                self.peer.register_member(
-                    remote_process_id
-                )
-
-                peer_address = (
-                    remote_host,
-                    remote_port
-                )
-
-                if peer_address in self.peer.known_peers:
-                    continue
-
-                # Only the peer with the smaller process ID creates
-                # the TCP connection.
-                #
-                # This prevents:
-                # Peer A -> Peer B
-                # and at the same time
-                # Peer B -> Peer A
-                #
-                # One TCP connection is enough because TCP is
-                # bidirectional.
-                if self.peer.process_id > remote_process_id:
-                    continue
-
-                print(
-                    f"[DISCOVERY] Found peer "
-                    f"{remote_username} at "
-                    f"{remote_host}:{remote_port} "
-                    f"with process ID "
-                    f"{remote_process_id}"
-                )
-
-                self.peer.connect_to_peer(
-                    remote_host,
-                    remote_port
-                )
 
             except (
                 json.JSONDecodeError,
@@ -192,6 +166,55 @@ class Discovery:
                     f"[DISCOVERY ERROR] "
                     f"Invalid discovery message: {error}"
                 )
+
+    def _handle_discovery_request(self, message):
+        remote_peer_id = message.get("peer_id")
+
+        if remote_peer_id == self.peer.peer_id:
+            return
+
+        remote_process_id = int(message["process_id"])
+
+        self.peer.register_member(remote_process_id)
+
+        if not self.peer.is_leader():
+            return
+
+        response = {
+            "type": "DISCOVERY_RESPONSE",
+            "target_peer_id": remote_peer_id,
+            "leader_peer_id": self.peer.peer_id,
+            "leader_username": self.peer.username,
+            "leader_port": self.peer.port,
+            "leader_process_id": self.peer.process_id
+        }
+
+        self._send_broadcast(response)
+
+    def _handle_discovery_response(self, message, address):
+        target_peer_id = message.get("target_peer_id")
+
+        if target_peer_id != self.peer.peer_id:
+            return
+
+        leader_process_id = int(message["leader_process_id"])
+        leader_port = int(message["leader_port"])
+
+        if leader_process_id == self.peer.process_id:
+            return
+
+        if self.peer.get_connection_for_process_id(leader_process_id) is not None:
+            return
+
+        leader_host = address[0]
+
+        print(
+            f"[DISCOVERY] Leader found: process "
+            f"{leader_process_id} at {leader_host}:{leader_port}"
+        )
+
+        self.peer.register_member(leader_process_id)
+        self.peer.connect_to_peer(leader_host, leader_port)
 
     def stop(self):
         self.running = False

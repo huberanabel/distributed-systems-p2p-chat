@@ -26,7 +26,6 @@ def main():
 
     print("\nYou can now write messages.")
     print("Commands:")
-    print("  /elect  -> start Bully election")
     print("  /leader -> show current leader")
     print("  exit    -> stop the peer\n")
 
@@ -37,15 +36,13 @@ def main():
             if text.lower() == "exit":
                 break
 
-            if text.lower() == "/elect":
-                peer.start_election()
-                continue
-
             if text.lower() == "/leader":
                 leader = peer.get_leader()
 
                 if leader is None:
                     print("[BULLY] No leader has been elected.")
+                elif leader == peer.process_id:
+                    print(f"[BULLY] Current leader: {leader} (this peer)")
                 else:
                     print(f"[BULLY] Current leader: {leader}")
 
