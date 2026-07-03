@@ -7,6 +7,7 @@ import uuid
 from message import Message
 from heartbeat import HeartbeatManager
 from election import BullyElection
+from lamport_clock import LamportClock
 
 
 class Peer:
@@ -23,6 +24,7 @@ class Peer:
         self.known_peers = set()
 
         self.process_id = self.port
+        self.lamport_clock = LamportClock()
 
         self.member_ids = {self.process_id}
 
@@ -47,6 +49,7 @@ class Peer:
             broadcast_packet=self.broadcast_control_packet,
             on_leader_change=self.on_leader_change
         )
+
 
     # ------------------------------------------------------------
     # Listening / connecting
@@ -291,8 +294,13 @@ class Peer:
                             )
                         )
 
+                        self.lamport_clock.receive_event(
+                            message.lamport_time
+                        )
+
                         print(
-                            f"\n[{message.sender_name}]: "
+                            f"\n[L={self.lamport_clock.get_time()}] "
+                            f"[{message.sender_name}]: "
                             f"{message.text}"
                         )
 
@@ -433,11 +441,13 @@ class Peer:
 
     def send_message(self, text):
 
+        lamport_time = self.lamport_clock.send_event()
+
         message = Message(
             sender_id=self.peer_id,
             sender_name=self.username,
             text=text,
-            timestamp=time.time()
+            lamport_time=lamport_time
         )
 
         packet = {
