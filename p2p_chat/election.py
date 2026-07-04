@@ -18,10 +18,7 @@ class BullyElection:
         on_leader_change: Callable[[int], None] | None = None
     ):
         self.process_id = int(process_id)
-
-
         self.get_members = get_members
-
         self.broadcast_packet = broadcast_packet
 
 

@@ -183,8 +183,6 @@ class Discovery:
         response = {
             "type": "DISCOVERY_RESPONSE",
             "target_peer_id": remote_peer_id,
-            "leader_peer_id": self.peer.peer_id,
-            "leader_username": self.peer.username,
             "leader_port": self.peer.port,
             "leader_process_id": self.peer.process_id
         }

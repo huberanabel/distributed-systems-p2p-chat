@@ -133,7 +133,7 @@ class HeartbeatManager:
                         connection,
                         {
                             "type": "HEARTBEAT",
-                            "timestamp": time.time()
+
                         }
                     )
 

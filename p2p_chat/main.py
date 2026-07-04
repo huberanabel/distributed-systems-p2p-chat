@@ -18,7 +18,6 @@ def main():
         target=peer.start_listener,
         daemon=True
     )
-
     listener_thread.start()
 
     discovery = Discovery(peer)
@@ -42,7 +41,10 @@ def main():
                 if leader is None:
                     print("[BULLY] No leader has been elected.")
                 elif leader == peer.process_id:
-                    print(f"[BULLY] Current leader: {leader} (this peer)")
+                    print(
+                        f"[BULLY] Current leader: "
+                        f"{leader} (this peer)"
+                    )
                 else:
                     print(f"[BULLY] Current leader: {leader}")
 
@@ -55,10 +57,7 @@ def main():
 
     finally:
         discovery.stop()
-
-        if hasattr(peer, "stop"):
-            peer.stop()
-
+        peer.stop()
         print("[SHUTDOWN] Program finished.")
 
 
