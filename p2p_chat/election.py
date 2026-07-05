@@ -15,14 +15,16 @@ class BullyElection:
         process_id: int,
         get_members: Callable[[], set[int]],
         broadcast_packet: Callable[[dict], None],
-        on_leader_change: Callable[[int], None] | None = None
+        on_leader_change: Callable[[int], None] | None = None,
+        get_username: Callable[[int], str | None] | None = None
     ):
         self.process_id = int(process_id)
         self.get_members = get_members
         self.broadcast_packet = broadcast_packet
 
-
         self.on_leader_change = on_leader_change
+
+        self.get_username = get_username
 
         self.leader_id: int | None = None
         self.election_in_progress = False
@@ -32,6 +34,19 @@ class BullyElection:
 
         self._lock = threading.RLock()
         self._election_generation = 0
+
+    def _describe(self, process_id: int) -> str:
+        if self.get_username is not None:
+            try:
+                username = self.get_username(process_id)
+
+                if username:
+                    return username
+
+            except Exception:
+                pass
+
+        return f"process {process_id}"
 
     def start_election(self) -> None:
 
@@ -58,7 +73,8 @@ class BullyElection:
             )
 
         print(
-            f"[BULLY] Process {self.process_id} starts an election."
+            f"[BULLY] {self._describe(self.process_id)} "
+            f"starts an election."
         )
 
         if not higher_processes:
@@ -114,8 +130,8 @@ class BullyElection:
             return
 
         print(
-            f"[BULLY] Process {self.process_id} received "
-            f"ELECTION from process {sender_id}."
+            f"[BULLY] {self._describe(self.process_id)} received "
+            f"ELECTION from {self._describe(sender_id)}."
         )
 
         self.broadcast_packet({
@@ -148,7 +164,7 @@ class BullyElection:
             return
 
         print(
-            f"[BULLY] Higher process {sender_id} answered OK."
+            f"[BULLY] {self._describe(sender_id)} answered OK."
         )
 
         self._ok_received.set()
@@ -165,9 +181,9 @@ class BullyElection:
 
         if leader_id < self.process_id:
             print(
-                f"[BULLY] Process {leader_id} cannot be leader "
-                f"because this process has the higher ID "
-                f"{self.process_id}."
+                f"[BULLY] {self._describe(leader_id)} cannot be "
+                f"leader because {self._describe(self.process_id)} "
+                f"has the higher ID."
             )
 
             with self._lock:
@@ -182,7 +198,8 @@ class BullyElection:
             self._coordinator_received.set()
 
         print(
-            f"[BULLY] Process {leader_id} is the new leader."
+            f"[BULLY] {self._describe(leader_id)} is the new "
+            f"leader."
         )
 
         self._notify_leader_change(leader_id)
@@ -241,7 +258,8 @@ class BullyElection:
             self._coordinator_received.set()
 
         print(
-            f"[BULLY] Process {self.process_id} becomes leader."
+            f"[BULLY] {self._describe(self.process_id)} "
+            f"becomes leader."
         )
 
         self.broadcast_packet({
@@ -261,7 +279,7 @@ class BullyElection:
 
         if failed_leader is not None:
             print(
-                f"[BULLY] Leader {failed_leader} failed."
+                f"[BULLY] {self._describe(failed_leader)} failed."
             )
 
         self.start_election()
@@ -278,8 +296,8 @@ class BullyElection:
             self._coordinator_received.set()
 
         print(
-            f"[BULLY] Adopting process {leader_id} as leader "
-            f"(learned from peer list)."
+            f"[BULLY] Adopting {self._describe(leader_id)} as "
+            f"leader (learned from peer list)."
         )
 
         self._notify_leader_change(leader_id)

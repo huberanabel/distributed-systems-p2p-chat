@@ -3,6 +3,8 @@ import socket
 import threading
 import time
 
+from network import get_local_ip, get_subnet_broadcast_address
+
 
 DISCOVERY_PORT = 5973
 BROADCAST_IP = "255.255.255.255"
@@ -84,18 +86,38 @@ class Discovery:
             1
         )
 
-        try:
-            announcement_socket.sendto(
-                json.dumps(message).encode("utf-8"),
-                (BROADCAST_IP, DISCOVERY_PORT)
-            )
+        encoded_message = json.dumps(message).encode("utf-8")
 
-        except OSError as error:
-            if self.running:
-                print(
-                    f"[DISCOVERY ERROR] "
-                    f"Could not send broadcast: {error}"
-                )
+        # Some network adapters (notably virtual/host-only adapters
+        # such as VirtualBox's) do not reliably forward the generic
+        # "limited broadcast" address 255.255.255.255. Sending to
+        # both the limited broadcast AND a best-effort, subnet-
+        # directed broadcast address (e.g. 192.168.56.255) covers
+        # both cases without needing extra dependencies to read the
+        # real interface netmask.
+        target_addresses = {BROADCAST_IP}
+
+        local_ip = get_local_ip()
+        subnet_broadcast = get_subnet_broadcast_address(local_ip)
+
+        if subnet_broadcast is not None:
+            target_addresses.add(subnet_broadcast)
+
+        try:
+            for target_ip in target_addresses:
+                try:
+                    announcement_socket.sendto(
+                        encoded_message,
+                        (target_ip, DISCOVERY_PORT)
+                    )
+
+                except OSError as error:
+                    if self.running:
+                        print(
+                            f"[DISCOVERY ERROR] "
+                            f"Could not send broadcast to "
+                            f"{target_ip}: {error}"
+                        )
 
         finally:
             announcement_socket.close()

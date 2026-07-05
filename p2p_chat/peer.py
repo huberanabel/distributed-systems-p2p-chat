@@ -7,6 +7,7 @@ from message import Message
 from heartbeat import HeartbeatManager
 from election import BullyElection
 from lamport_clock import LamportClock
+from network import get_local_ip
 
 
 MAX_PACKET_SIZE = 1_048_576
@@ -18,8 +19,20 @@ class Peer:
     def __init__(self, username, host, port):
         self.peer_id = str(uuid.uuid4())
         self.username = username
+
+        # self.host is the BIND address (usually "0.0.0.0", meaning
+        # "accept connections on every local network interface").
+        # It is only ever valid to pass to socket.bind() and must
+        # never be told to other peers as an address to connect to.
         self.host = host
         self.port = int(port)
+
+        # advertised_host is this device's actual, routable IP
+        # address -- the one other peers can really connect to. It
+        # is determined once at startup (see network_utils.py) and
+        # used everywhere we announce our own address to the
+        # network (currently: broadcast_peer_list's self entry).
+        self.advertised_host = get_local_ip()
 
         # Eindeutige Prozess-ID, unabhängig vom verwendeten Port.
         self.process_id = uuid.uuid4().int & ((1 << 63) - 1)
@@ -43,6 +56,10 @@ class Peer:
         self.receive_buffers = {}
 
         self.remote_peers = {}
+
+        # speichert username auch nach Verbindungstrennung eines Peers
+        # um diesen den anderen Peers anzuzeigen
+        self._known_usernames = {}
         self.connection_addresses = {}
         self.outgoing_connections = set()
 
@@ -62,7 +79,8 @@ class Peer:
             process_id=self.process_id,
             get_members=self.get_member_ids,
             broadcast_packet=self.broadcast_control_packet,
-            on_leader_change=self.on_leader_change
+            on_leader_change=self.on_leader_change,
+            get_username=self.get_username_for_process_id
         )
 
         self.heartbeat.start()
@@ -129,6 +147,11 @@ class Peer:
                 f"is running on {self.host}:{self.port}"
             )
 
+            print(
+                f"[REACHABLE AT] Other devices can reach this "
+                f"peer at {self.advertised_host}:{self.port}"
+            )
+
             print(f"[PEER ID] {self.peer_id}")
             print(f"[PROCESS ID] {self.process_id}")
 
@@ -147,8 +170,8 @@ class Peer:
                 self._register_connection(connection)
 
                 print(
-                    f"[CONNECTED] New peer connected "
-                    f"from {address}"
+                    f"[CONNECTING] Incoming connection "
+                    f"from {address[0]}..."
                 )
 
                 thread = threading.Thread(
@@ -191,6 +214,7 @@ class Peer:
             peer_port == self.port
             and peer_host in {
                 self.host,
+                self.advertised_host,
                 "127.0.0.1",
                 "localhost",
                 "0.0.0.0"
@@ -222,8 +246,9 @@ class Peer:
             )
 
             print(
-                f"[CONNECTED] Connected to peer "
-                f"{peer_host}:{peer_port}"
+                f"[CONNECTING] Connection to "
+                f"{peer_host}:{peer_port} established, "
+                f"waiting for handshake..."
             )
 
             thread = threading.Thread(
@@ -326,6 +351,15 @@ class Peer:
                     )
 
                 for packet_bytes in packet_lines:
+
+                    with self.connection_lock:
+                        still_connected = (
+                            connection in self.connections
+                        )
+
+                    if not still_connected:
+                        return
+
                     try:
                         packet_text = packet_bytes.decode(
                             "utf-8"
@@ -611,8 +645,8 @@ class Peer:
                     )
 
             print(
-                f"[PEER] Duplicate connection to process "
-                f"{process_id} detected. "
+                f"[PEER] Duplicate connection to "
+                f"{peer_information['username']} detected. "
                 f"Closing the redundant connection."
             )
 
@@ -633,6 +667,10 @@ class Peer:
 
             self.member_ids.add(process_id)
 
+            self._known_usernames[process_id] = (
+                peer_information["username"]
+            )
+
             if (
                 connection
                 not in self.connection_addresses
@@ -650,18 +688,11 @@ class Peer:
                 self.known_peers.add(peer_address)
 
         print(
-            f"[PEER READY] "
-            f"{peer_information['username']} "
-            f"uses process ID {process_id}"
+            f"[CONNECTED] "
+            f"{peer_information['username']} is connected."
         )
 
-        if (
-            self.is_leader()
-            and process_id > self.process_id
-        ):
-            self.start_election()
-
-        elif self.is_leader():
+        if self.is_leader():
             self.broadcast_peer_list()
 
         self.update_heartbeat_roles()
@@ -712,16 +743,16 @@ class Peer:
 
             return
 
-        if leader_process_id < self.process_id:
-            print(
-                "[PEER_LIST ERROR] A lower process "
-                "cannot be leader. "
-                "Starting a new election."
-            )
-
-            self.start_election()
-            return
-
+        # Note: we deliberately do NOT reject this leader claim just
+        # because leader_process_id is lower than our own process
+        # ID. The sender_information check above already confirmed
+        # this PEER_LIST truly came from the connection belonging to
+        # that process (via its HELLO handshake), so it is a
+        # trustworthy, already-settled fact about the network, not
+        # a competing candidacy to be judged by Bully's ID rule.
+        # The leader should only ever change again once it actually
+        # fails (see handle_leader_failure), not simply because a
+        # peer with a higher ID happens to join later.
         if (
             self.election.get_leader()
             != leader_process_id
@@ -882,7 +913,7 @@ class Peer:
             {
                 "peer_id": self.peer_id,
                 "username": self.username,
-                "host": self.host,
+                "host": self.advertised_host,
                 "port": self.port,
                 "process_id": self.process_id
             }
@@ -954,7 +985,7 @@ class Peer:
                 ):
                     return information["username"]
 
-        return None
+            return self._known_usernames.get(process_id)
 
     # ------------------------------------------------------------
     # Election-Hilfsmethoden

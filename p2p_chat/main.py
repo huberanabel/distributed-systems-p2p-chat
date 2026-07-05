@@ -5,8 +5,24 @@ from peer import Peer
 
 
 def main():
-    username = input("Username: ")
-    port = int(input("Your port: "))
+    username = input("Username: ").strip()
+    # The port must always be entered explicitly
+    while True:
+        port_input = input("Your port: ").strip()
+
+        try:
+            port = int(port_input)
+
+            if not (0 < port <= 65535):
+                raise ValueError
+
+            break
+
+        except ValueError:
+            print(
+                "Please enter a valid port number "
+                "(1-65535)."
+            )
 
     peer = Peer(
         username=username,
