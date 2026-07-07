@@ -60,7 +60,7 @@ def main():
                 elif leader == peer.process_id:
                     print(
                         f"[BULLY] Current leader: "
-                        f"{peer.username} ({leader}) (this peer)"
+                        f"{peer.username} ({leader}) (this peer)" #username wird mit angezeigt
                     )
 
                 else:
