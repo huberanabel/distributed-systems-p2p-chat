@@ -56,13 +56,25 @@ def main():
 
                 if leader is None:
                     print("[BULLY] No leader has been elected.")
+
                 elif leader == peer.process_id:
                     print(
                         f"[BULLY] Current leader: "
-                        f"{leader} (this peer)"
+                        f"{peer.username} ({leader}) (this peer)"
                     )
+
                 else:
-                    print(f"[BULLY] Current leader: {leader}")
+                    leader_name = peer.get_username_for_process_id(
+                        leader
+                    )
+
+                    if leader_name is None:
+                        leader_name = "unknown"
+
+                    print(
+                        f"[BULLY] Current leader: "
+                        f"{leader_name} ({leader})"
+                    )
 
                 continue
 
