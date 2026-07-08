@@ -8,10 +8,12 @@ from network import get_local_ip, get_subnet_broadcast_address
 
 DISCOVERY_PORT = 5973
 BROADCAST_IP = "255.255.255.255"
-ANNOUNCEMENT_INTERVAL = 5
+ANNOUNCEMENT_INTERVAL = 5  # Seconds between repeated discovery broadcasts
 
 
 class Discovery:
+    # Handles finding other peers on the local network via UDP broadcast,
+    # independent of the TCP connections used for actual chat traffic.
 
     def __init__(self, peer):
         self.peer = peer
@@ -19,6 +21,7 @@ class Discovery:
         self.listener_socket = None
 
     def start(self):
+        # Starts the UDP listener and the periodic announcement loop, each in its own thread
         listener_thread = threading.Thread(
             target=self.listen,
             daemon=True
@@ -32,6 +35,9 @@ class Discovery:
         announcement_thread.start()
 
     def announce_loop(self):
+        # Periodically broadcasts a DISCOVERY_REQUEST until a leader is known.
+        # On the first pass without a known leader, it also triggers an
+        # election so a new group of peers agrees on a leader.
         first_attempt = True
 
         while self.running:
@@ -47,7 +53,6 @@ class Discovery:
                 print(
                     f"[DISCOVERY] Leader is known: "
                     f"{leader_username}. "
-                    f"Stopping discovery announcements."
                 )
                 return
 
@@ -59,6 +64,8 @@ class Discovery:
                 self.peer.start_election()
 
     def send_announcement(self):
+        # Builds and sends a DISCOVERY_REQUEST broadcast so other peers on
+        # the network learn about this peer's existence
         message = {
             "type": "DISCOVERY_REQUEST",
             "peer_id": self.peer.peer_id,
@@ -69,6 +76,7 @@ class Discovery:
         self._send_broadcast(message)
 
     def _send_broadcast(self, message):
+        # Low-level UDP broadcast helper shared by requests and responses
         announcement_socket = socket.socket(
             socket.AF_INET,
             socket.SOCK_DGRAM
@@ -88,11 +96,8 @@ class Discovery:
 
         encoded_message = json.dumps(message).encode("utf-8")
 
-        # Some network adapters (notably virtual/host-only adapters
-        # such as VirtualBox's) do not reliably forward the generic
-        # "limited broadcast" address 255.255.255.255. Sending to
-        # both the limited broadcast AND a best-effort, subnet-
-        # directed broadcast address (e.g. 192.168.56.255) covers
+        # Sending to both the limited broadcast address 255.255.255.255 AND a best-effort, 
+        # subnetdirected broadcast address (e.g. 192.168.56.255) covers
         # both cases without needing extra dependencies to read the
         # real interface netmask.
         target_addresses = {BROADCAST_IP}
@@ -123,6 +128,8 @@ class Discovery:
             announcement_socket.close()
 
     def listen(self):
+        # Background loop listening for incoming UDP discovery packets
+        # (both requests from new peers and responses from a leader)
         listener_socket = socket.socket(
             socket.AF_INET,
             socket.SOCK_DGRAM
@@ -135,6 +142,8 @@ class Discovery:
         )
 
         try:
+            # Allows multiple peer instances on the same machine to bind
+            # the same discovery port (multiple local peers).
             listener_socket.setsockopt(
                 socket.SOL_SOCKET,
                 socket.SO_REUSEPORT,
@@ -142,6 +151,7 @@ class Discovery:
             )
 
         except (AttributeError, OSError):
+            # SO_REUSEPORT isn't available on all platforms (e.g. Windows)
             pass
 
         listener_socket.bind(
@@ -159,6 +169,7 @@ class Discovery:
                 data, address = listener_socket.recvfrom(4096)
 
             except socket.timeout:
+                # Timeout just lets the loop re-check self.running periodically
                 continue
 
             except OSError:
@@ -190,9 +201,12 @@ class Discovery:
                 )
 
     def _handle_discovery_request(self, message):
+        # A new peer is announcing itself. We register it as a known member,
+        # and if we are the current leader, we reply so it can connect to us.
         remote_peer_id = message.get("peer_id")
 
         if remote_peer_id == self.peer.peer_id:
+            # Ignore our own broadcast (loopback)
             return
 
         remote_process_id = int(message["process_id"])
@@ -212,9 +226,12 @@ class Discovery:
         self._send_broadcast(response)
 
     def _handle_discovery_response(self, message, address):
+        # A leader has replied directly to our discovery request;
+        # connect to it via TCP so we join the existing peer group.
         target_peer_id = message.get("target_peer_id")
 
         if target_peer_id != self.peer.peer_id:
+            # broadcast is received by everyone
             return
 
         leader_process_id = int(message["leader_process_id"])
@@ -224,9 +241,10 @@ class Discovery:
             return
 
         if self.peer.get_connection_for_process_id(leader_process_id) is not None:
+            # Already connected to this leader, no need to connect again
             return
 
-        leader_host = address[0]
+        leader_host = address[0]  # Use the actual sender IP from the UDP packet, not any field in the payload
 
         print(
             f"[DISCOVERY] Leader found: process "
@@ -237,6 +255,7 @@ class Discovery:
         self.peer.connect_to_peer(leader_host, leader_port)
 
     def stop(self):
+        # Stops the discovery loops and releases the UDP socket
         self.running = False
 
         if self.listener_socket is not None:

@@ -15,6 +15,8 @@ MAX_RECEIVE_BUFFER = MAX_PACKET_SIZE
 
 
 class Peer:
+    # Central class: manages TCP connections to other peers, dispatches
+    # incoming packets, and wires together heartbeat, election, and Lamport clock.
 
     def __init__(self, username, host, port):
         self.peer_id = str(uuid.uuid4())
@@ -34,7 +36,7 @@ class Peer:
         # network (currently: broadcast_peer_list's self entry).
         self.advertised_host = get_local_ip()
 
-        # Eindeutige Prozess-ID, unabhängig vom verwendeten Port.
+        # Unique process ID, independent of the port used.
         self.process_id = uuid.uuid4().int & ((1 << 63) - 1)
 
         if self.process_id == 0:
@@ -46,25 +48,25 @@ class Peer:
 
         self.running = True
 
-        # Schützt gemeinsame Daten vor parallelen Thread-Zugriffen.
+        # Protects shared data from concurrent thread access.
         self.connection_lock = threading.RLock()
 
-        # Wird gespeichert, damit stop() den Listener schließen kann.
+        # Stored so stop() can close the listener.
         self.listener_socket = None
 
-        # Empfangsdaten werden als Bytes gespeichert.
+        # Receive data is stored as bytes.
         self.receive_buffers = {}
 
         self.remote_peers = {}
 
-        # speichert username auch nach Verbindungstrennung eines Peers
-        # um diesen den anderen Peers anzuzeigen
+        # Keeps usernames even after a peer disconnects,
+        # so they can still be shown to other peers.
         self._known_usernames = {}
         self.connection_addresses = {}
         self.outgoing_connections = set()
 
-        # Verhindert, dass mehrere Threads gleichzeitig auf
-        # denselben Socket schreiben.
+        # Prevents multiple threads from writing to the
+        # same socket at the same time.
         self.send_locks = {}
 
         self.lamport_clock = LamportClock()
@@ -86,7 +88,7 @@ class Peer:
         self.heartbeat.start()
 
     # ------------------------------------------------------------
-    # Verbindungen registrieren
+    # Register connections
     # ------------------------------------------------------------
 
     def _register_connection(
@@ -95,6 +97,8 @@ class Peer:
         peer_address=None,
         outgoing=False
     ):
+        # Adds a new socket to all the bookkeeping structures
+        # (buffers, locks, heartbeat tracking) needed to use it
         with self.connection_lock:
             if connection in self.connections:
                 return
@@ -120,6 +124,7 @@ class Peer:
     # ------------------------------------------------------------
 
     def start_listener(self):
+        # Runs in its own thread: accepts incoming TCP connections from other peers
         listener_socket = socket.socket(
             socket.AF_INET,
             socket.SOCK_STREAM
@@ -162,6 +167,7 @@ class Peer:
                     )
 
                 except socket.timeout:
+                    # Timeout just lets the loop re-check self.running periodically
                     continue
 
                 except OSError:
@@ -174,6 +180,7 @@ class Peer:
                     f"from {address[0]}..."
                 )
 
+                # Each connection gets its own receive thread
                 thread = threading.Thread(
                     target=self.handle_connection,
                     args=(connection,),
@@ -203,10 +210,11 @@ class Peer:
                 self.listener_socket = None
 
     # ------------------------------------------------------------
-    # Verbindung zu Peer
+    # Connect to a peer
     # ------------------------------------------------------------
 
     def connect_to_peer(self, peer_host, peer_port):
+        # Actively opens an outgoing TCP connection to another peer
         peer_port = int(peer_port)
         peer_address = (peer_host, peer_port)
 
@@ -220,13 +228,14 @@ class Peer:
                 "0.0.0.0"
             }
         ):
+            # Avoid connecting to ourselves
             return
 
         with self.connection_lock:
             if peer_address in self.known_peers:
                 return
 
-            # Adresse vorübergehend reservieren.
+            # Reserve the address temporarily to avoid duplicate connection attempts.
             self.known_peers.add(peer_address)
 
         peer_socket = socket.socket(
@@ -263,6 +272,7 @@ class Peer:
             self.update_heartbeat_roles()
 
         except Exception as error:
+            # Connection failed -> release the reserved address again
             with self.connection_lock:
                 self.known_peers.discard(peer_address)
 
@@ -278,10 +288,12 @@ class Peer:
             )
 
     # ------------------------------------------------------------
-    # HELLO senden
+    # Send HELLO
     # ------------------------------------------------------------
 
     def send_hello(self, connection):
+        # HELLO is the handshake packet exchanged right after a TCP
+        # connection is established, telling the other side who we are
         packet = {
             "type": "HELLO",
             "peer_id": self.peer_id,
@@ -305,15 +317,18 @@ class Peer:
             self.remove_connection(connection)
 
     # ------------------------------------------------------------
-    # Daten empfangen
+    # Receive data
     # ------------------------------------------------------------
 
     def handle_connection(self, connection):
+        # Per-connection receive loop: reads raw bytes, splits them into
+        # newline-delimited JSON packets, and dispatches each one
         while self.running:
             try:
                 data = connection.recv(4096)
 
                 if not data:
+                    # Peer closed the connection
                     break
 
                 self.heartbeat.mark_alive(connection)
@@ -329,12 +344,15 @@ class Peer:
                     current_buffer += data
 
                     if len(current_buffer) > MAX_RECEIVE_BUFFER:
+                        # Guards against a malicious/buggy peer flooding us without newlines
                         raise ValueError(
                             "Receive buffer is too large."
                         )
 
                     packet_lines = []
 
+                    # Packets are newline-delimited; split off every complete line,
+                    # keeping any leftover partial data in the buffer for next time
                     while b"\n" in current_buffer:
                         packet_bytes, current_buffer = (
                             current_buffer.split(
@@ -384,6 +402,7 @@ class Peer:
                         TypeError,
                         ValueError
                     ) as error:
+                        # A single malformed packet shouldn't kill the whole connection
                         print(
                             f"[WARNING] Invalid packet ignored: "
                             f"{error}"
@@ -405,10 +424,11 @@ class Peer:
         self.remove_connection(connection)
 
     # ------------------------------------------------------------
-    # Einzelnes Paket verarbeiten
+    # Process a single packet
     # ------------------------------------------------------------
 
     def _handle_packet(self, connection, packet):
+        # Routes an incoming packet to the right handler based on its "type"
         packet_type = packet.get("type")
 
         if packet_type == "HELLO":
@@ -424,6 +444,7 @@ class Peer:
             )
 
         elif packet_type == "HEARTBEAT":
+            # Reply to a heartbeat so the sender knows we're still alive
             self.send_control_packet(
                 connection,
                 {
@@ -432,6 +453,7 @@ class Peer:
             )
 
         elif packet_type == "HEARTBEAT_ACK":
+            # No action needed; receiving any data already marks the connection alive
             return
 
         elif packet_type in {
@@ -439,6 +461,8 @@ class Peer:
             "OK",
             "COORDINATOR"
         }:
+            # Bully algorithm control packets are forwarded to the election module,
+            # but only after verifying the sender_id matches the connection's HELLO identity
             remote_peer = self._get_remote_peer(
                 connection
             )
@@ -480,6 +504,8 @@ class Peer:
                 )
             )
 
+            # Verify the message actually came from the peer on this connection
+            # (prevents spoofing another peer's identity)
             if message.sender_id != remote_peer["peer_id"]:
                 raise ValueError(
                     "Chat message has a false sender_id."
@@ -490,6 +516,7 @@ class Peer:
                     "Chat message has a false sender_name."
                 )
 
+            # Update our Lamport clock based on the received timestamp
             with self.lamport_lock:
                 self.lamport_clock.receive_event(
                     message.lamport_time
@@ -518,10 +545,11 @@ class Peer:
             )
 
     # ------------------------------------------------------------
-    # Peer-Information abrufen
+    # Retrieve peer information
     # ------------------------------------------------------------
 
     def _get_remote_peer(self, connection):
+        # Returns a copy of the stored HELLO info for a connection (or None if not yet handshaked)
         with self.connection_lock:
             information = self.remote_peers.get(
                 connection
@@ -533,10 +561,13 @@ class Peer:
             return dict(information)
 
     # ------------------------------------------------------------
-    # Doppelte Verbindung vergleichen
+    # Compare duplicate connections
     # ------------------------------------------------------------
 
     def _connection_rank(self, connection):
+        # Produces a deterministic, comparable "rank" for a connection based on
+        # its socket endpoints, used as a tie-breaker when two peers connect to
+        # each other simultaneously and end up with duplicate connections
         try:
             endpoints = [
                 connection.getsockname(),
@@ -552,10 +583,13 @@ class Peer:
             )
 
     # ------------------------------------------------------------
-    # HELLO verarbeiten
+    # Process HELLO
     # ------------------------------------------------------------
 
     def handle_hello(self, connection, packet):
+        # Processes the handshake packet from a peer, including detecting and
+        # resolving duplicate connections that can arise when both sides dial
+        # each other around the same time.
         process_id = int(packet["process_id"])
         peer_port = int(packet["port"])
 
@@ -579,6 +613,7 @@ class Peer:
         }
 
         with self.connection_lock:
+            # Check whether we already have a different connection to the same process ID
             existing_connection = next(
                 (
                     current_connection
@@ -607,6 +642,10 @@ class Peer:
             )
 
         if existing_connection is not None:
+            # Duplicate connection detected: decide deterministically which one to keep.
+            # Rule of thumb: the connection whose direction matches "lower ID dials
+            # out to higher ID" is preferred; if both/neither match, fall back to
+            # a stable rank comparison so both sides make the same decision.
             desired_outgoing = (
                 self.process_id < process_id
             )
@@ -676,6 +715,8 @@ class Peer:
                 not in self.connection_addresses
                 and real_host is not None
             ):
+                # Fills in the address for incoming connections, which
+                # didn't have one recorded at accept() time
                 peer_address = (
                     real_host,
                     peer_port
@@ -693,15 +734,18 @@ class Peer:
         )
 
         if self.is_leader():
+            # Leader shares the full peer list so the new peer learns about everyone else
             self.broadcast_peer_list()
 
         self.update_heartbeat_roles()
 
     # ------------------------------------------------------------
-    # Peer-Liste verarbeiten
+    # Process peer list
     # ------------------------------------------------------------
 
     def handle_peer_list(self, connection, packet):
+        # Handles a PEER_LIST packet from the leader: adopts the announced
+        # leader and connects to any newly-learned peers we're not yet connected to
         try:
             leader_process_id = int(
                 packet["leader_process_id"]
@@ -736,6 +780,7 @@ class Peer:
             or sender_information["process_id"]
             != leader_process_id
         ):
+            # Only trust a PEER_LIST if it actually comes from the process claiming to be leader
             print(
                 "[PEER_LIST ERROR] The peer list "
                 "was not sent by its claimed leader."
@@ -788,6 +833,7 @@ class Peer:
             )
 
             if remote_process_id == leader_process_id:
+                # Already connected to the leader (that's how we got this packet)
                 continue
 
             if (
@@ -796,15 +842,19 @@ class Peer:
                 )
                 is not None
             ):
+                # Already connected to this peer
                 continue
 
             if (
                 not remote_host
                 or remote_host == "0.0.0.0"
             ):
+                # Can't dial an unspecified/bind address
                 continue
 
             if self.process_id > remote_process_id:
+                # Only the lower-ID side initiates the connection, to avoid
+                # both sides dialing each other and creating duplicates
                 continue
 
             self.connect_to_peer(
@@ -815,10 +865,12 @@ class Peer:
         self.update_heartbeat_roles()
 
     # ------------------------------------------------------------
-    # Chatnachricht senden
+    # Send chat message
     # ------------------------------------------------------------
 
     def send_message(self, text):
+        # Sends a chat message to all connected peers, tagging it with
+        # a fresh Lamport timestamp
         with self.lamport_lock:
             lamport_time = (
                 self.lamport_clock.send_event()
@@ -837,7 +889,7 @@ class Peer:
         self.broadcast_control_packet(packet)
 
     # ------------------------------------------------------------
-    # Kontrollpaket senden
+    # Send control packet
     # ------------------------------------------------------------
 
     def send_control_packet(
@@ -845,6 +897,8 @@ class Peer:
         connection,
         packet
     ):
+        # Serializes and sends a single packet on one connection.
+        # A trailing newline acts as the message delimiter (see handle_connection).
         encoded_packet = (
             json.dumps(
                 packet,
@@ -867,14 +921,18 @@ class Peer:
                 "Connection is no longer registered."
             )
 
+        # Per-connection lock avoids interleaving bytes from different
+        # threads writing to the same socket concurrently
         with send_lock:
             connection.sendall(encoded_packet)
 
     # ------------------------------------------------------------
-    # Paket an alle Peers senden
+    # Send packet to all peers
     # ------------------------------------------------------------
 
     def broadcast_control_packet(self, packet):
+        # Sends the same packet to every currently connected peer;
+        # any connection that fails to send is torn down
         with self.connection_lock:
             connections = list(
                 self.connections
@@ -898,10 +956,12 @@ class Peer:
                 )
 
     # ------------------------------------------------------------
-    # Peer-Liste senden
+    # Send peer list
     # ------------------------------------------------------------
 
     def broadcast_peer_list(self):
+        # Only meaningful when called by the current leader: shares the
+        # full known peer directory (including ourselves) with everyone
         with self.connection_lock:
             remote_information = [
                 dict(information)
@@ -937,16 +997,19 @@ class Peer:
         self.broadcast_control_packet(packet)
 
     # ------------------------------------------------------------
-    # Mitgliederverwaltung
+    # Member management
     # ------------------------------------------------------------
 
     def register_member(self, process_id):
+        # Adds a process ID to the known member set, used by the Bully
+        # algorithm to know who else is out there (even before a direct connection exists)
         with self.connection_lock:
             self.member_ids.add(
                 int(process_id)
             )
 
     def get_member_ids(self):
+        # Thread-safe snapshot of all known process IDs (used by BullyElection)
         with self.connection_lock:
             return set(self.member_ids)
 
@@ -954,6 +1017,7 @@ class Peer:
         self,
         process_id
     ):
+        # Looks up the socket connection belonging to a given process ID, if any
         process_id = int(process_id)
 
         with self.connection_lock:
@@ -972,6 +1036,8 @@ class Peer:
         self,
         process_id
     ):
+        # Resolves a process ID to a display name, falling back to a cached
+        # username even if the peer has since disconnected
         if process_id == self.process_id:
             return self.username
 
@@ -988,7 +1054,7 @@ class Peer:
             return self._known_usernames.get(process_id)
 
     # ------------------------------------------------------------
-    # Election-Hilfsmethoden
+    # Election helper methods
     # ------------------------------------------------------------
 
     def start_election(self):
@@ -1006,16 +1072,23 @@ class Peer:
         )
 
     def on_leader_change(self, leader_id):
+        # Called by BullyElection whenever the leader changes: heartbeat
+        # roles need to be recalculated, and a new leader shares the peer list
         self.update_heartbeat_roles()
 
         if self.is_leader():
             self.broadcast_peer_list()
 
     # ------------------------------------------------------------
-    # Heartbeat-Rollen aktualisieren
+    # Update heartbeat roles
     # ------------------------------------------------------------
 
     def update_heartbeat_roles(self):
+        # Decides which connections should actively send heartbeats:
+        # - If there's no leader yet, everyone heartbeats everyone (safety net).
+        # - If we are the leader, we heartbeat all our connections.
+        # - Otherwise, we only heartbeat the leader's connection and stop
+        #   tracking all others (the leader is responsible for those).
         leader_id = self.get_leader()
 
         with self.connection_lock:
@@ -1060,10 +1133,11 @@ class Peer:
                 )
 
     # ------------------------------------------------------------
-    # Timeout behandeln
+    # Handle timeout
     # ------------------------------------------------------------
 
     def handle_peer_timeout(self, connection):
+        # Called by HeartbeatManager when a connection stops responding
         with self.connection_lock:
             connected = (
                 connection in self.connections
@@ -1080,10 +1154,12 @@ class Peer:
         self.remove_connection(connection)
 
     # ------------------------------------------------------------
-    # Verbindung entfernen
+    # Remove connection
     # ------------------------------------------------------------
 
     def remove_connection(self, connection):
+        # Tears down a connection and all associated state, and reacts
+        # accordingly if the failed peer turns out to have been the leader
         with self.connection_lock:
             if connection not in self.connections:
                 return
@@ -1133,6 +1209,8 @@ class Peer:
                     remote_peer["username"]
                 )
 
+                # A peer can have multiple connections in edge cases;
+                # only treat it as fully gone if no connection remains
                 still_connected = any(
                     information["process_id"]
                     == failed_process_id
@@ -1187,6 +1265,7 @@ class Peer:
             and failed_process_id == current_leader
             and self.running
         ):
+            # The leader itself disconnected -> trigger a new election
             print(
                 "\n[BULLY] The leader failed. "
                 "Starting a new election."
@@ -1199,16 +1278,19 @@ class Peer:
             and self.is_leader()
             and not still_connected
         ):
+            # We are the leader and lost a regular peer -> update everyone's peer list
             self.broadcast_peer_list()
 
         if self.running:
             self.update_heartbeat_roles()
 
     # ------------------------------------------------------------
-    # Programm beenden
+    # Shut down the program
     # ------------------------------------------------------------
 
     def stop(self):
+        # shuts down: stops heartbeat monitoring, closes the
+        # listener socket, and closes every peer connection
         self.running = False
         self.heartbeat.stop()
 

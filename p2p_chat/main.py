@@ -24,18 +24,21 @@ def main():
                 "(1-65535)."
             )
 
+    # Binds on all interfaces (0.0.0.0) so peers can connect via any local network path
     peer = Peer(
         username=username,
         host="0.0.0.0",
         port=port
     )
 
+    # Runs the TCP listener in its own thread so the main thread stays free for user input
     listener_thread = threading.Thread(
         target=peer.start_listener,
         daemon=True
     )
     listener_thread.start()
 
+    # Starts UDP-based peer discovery (finds other peers / a leader on the LAN)
     discovery = Discovery(peer)
     discovery.start()
 
@@ -84,6 +87,7 @@ def main():
         print("\n[SHUTDOWN] Ctrl+C received.")
 
     finally:
+        # Always clean up discovery and peer connections, even on Ctrl+C or errors
         discovery.stop()
         peer.stop()
         print("[SHUTDOWN] Program finished.")

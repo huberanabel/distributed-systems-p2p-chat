@@ -4,11 +4,13 @@ import threading
 from collections.abc import Callable
 
 
-ELECTION_TIMEOUT = 3.0
-COORDINATOR_TIMEOUT = 5.0
+ELECTION_TIMEOUT = 3.0      # How long to wait for an OK reply before declaring ourselves leader
+COORDINATOR_TIMEOUT = 5.0   # After receiving OK, how long to wait for the COORDINATOR message before retrying
 
 
 class BullyElection:
+    # Implements the Bully algorithm: the process with the highest ID
+    # among the reachable members becomes the leader/coordinator.
 
     def __init__(
         self,
@@ -19,12 +21,12 @@ class BullyElection:
         get_username: Callable[[int], str | None] | None = None
     ):
         self.process_id = int(process_id)
-        self.get_members = get_members
-        self.broadcast_packet = broadcast_packet
+        self.get_members = get_members            # Callback returning the current set of known process IDs
+        self.broadcast_packet = broadcast_packet   # Callback used to send ELECTION/OK/COORDINATOR packets to peers
 
         self.on_leader_change = on_leader_change
 
-        self.get_username = get_username
+        self.get_username = get_username  # username instead of raw ID for nicer log output
 
         self.leader_id: int | None = None
         self.election_in_progress = False
@@ -33,9 +35,10 @@ class BullyElection:
         self._coordinator_received = threading.Event()
 
         self._lock = threading.RLock()
-        self._election_generation = 0
+        self._election_generation = 0  # Increments per election so stale, delayed callbacks can be ignored
 
     def _describe(self, process_id: int) -> str:
+        # Helper for logging: shows the username if known, otherwise the raw process ID
         if self.get_username is not None:
             try:
                 username = self.get_username(process_id)
@@ -49,7 +52,8 @@ class BullyElection:
         return f"process {process_id}"
 
     def start_election(self) -> None:
-
+        # Kicks off a new Bully election. If another election is already
+        # running, this call is ignored (only one election at a time)
 
         with self._lock:
             if self.election_in_progress:
@@ -66,6 +70,8 @@ class BullyElection:
 
             members = self.get_members()
 
+            # Bully rule: only processes with a higher ID may become leader,
+            # so we only need to wait for those
             higher_processes = sorted(
                 member_id
                 for member_id in members
@@ -78,6 +84,7 @@ class BullyElection:
         )
 
         if not higher_processes:
+            # No one with a higher ID exists -> we win immediately
             self._become_leader(generation)
             return
 
@@ -87,6 +94,8 @@ class BullyElection:
             "target_ids": higher_processes
         })
 
+        # Wait for OK/COORDINATOR responses in a background thread so
+        # start_election() itself doesn't block the caller.
         waiting_thread = threading.Thread(
             target=self._wait_for_result,
             args=(generation,),
@@ -95,8 +104,7 @@ class BullyElection:
         waiting_thread.start()
 
     def handle_packet(self, packet: dict) -> None:
-
-
+        # Dispatches an incoming Bully control packet to the right handler
         packet_type = packet.get("type")
 
         if packet_type == "ELECTION":
@@ -109,7 +117,8 @@ class BullyElection:
             self._handle_coordinator(packet)
 
     def _handle_election(self, packet: dict) -> None:
-
+        # Received an ELECTION message from a lower-ID process:
+        # reply OK (we are alive and have a higher ID) and start our own election.
 
         try:
             sender_id = int(packet["sender_id"])
@@ -124,9 +133,12 @@ class BullyElection:
             return
 
         if target_ids and self.process_id not in target_ids:
+            # This ELECTION wasn't addressed to us (broadcast reaches everyone,
+            # but only the listed higher-ID targets should react).
             return
 
         if sender_id >= self.process_id:
+            # Only respond if the sender has a lower ID than us
             return
 
         print(
@@ -144,10 +156,13 @@ class BullyElection:
             election_running = self.election_in_progress
 
         if not election_running:
+            # We're not already in an election -> start our own,
+            # since we outrank the original sender and might become leader.
             self.start_election()
 
     def _handle_ok(self, packet: dict) -> None:
-
+        # Received an OK reply, meaning a higher-ID process is alive
+        # and will take over the election; we should stand down and wait.
 
         try:
             sender_id = int(packet["sender_id"])
@@ -170,7 +185,8 @@ class BullyElection:
         self._ok_received.set()
 
     def _handle_coordinator(self, packet: dict) -> None:
-
+        # Received a COORDINATOR announcement: accept it as the new leader,
+        # unless our own ID is actually higher (defensive check).
 
         try:
             leader_id = int(packet["leader_id"])
@@ -180,6 +196,8 @@ class BullyElection:
             return
 
         if leader_id < self.process_id:
+            # Should not normally happen under correct Bully behavior,
+            # but if it does, reject this leader and re-run our own election.
             print(
                 f"[BULLY] {self._describe(leader_id)} cannot be "
                 f"leader because {self._describe(self.process_id)} "
@@ -205,7 +223,9 @@ class BullyElection:
         self._notify_leader_change(leader_id)
 
     def _wait_for_result(self, generation: int) -> None:
-
+        # Runs in a background thread after starting an election:
+        # waits first for any OK, then for the COORDINATOR announcement,
+        # taking over as leader or retrying if things time out.
 
         ok_received = self._ok_received.wait(
             ELECTION_TIMEOUT
@@ -213,12 +233,14 @@ class BullyElection:
 
         with self._lock:
             if generation != self._election_generation:
+                # A newer election has since started; this thread's result is stale.
                 return
 
             if not self.election_in_progress:
                 return
 
         if not ok_received:
+            # No higher process answered in time -> we become the leader
             self._become_leader(generation)
             return
 
@@ -236,6 +258,8 @@ class BullyElection:
         if coordinator_received:
             return
 
+        # Someone answered OK but never announced themselves as coordinator
+        # (e.g. they crashed mid-election) -> restart the election.
         print(
             "[BULLY] No COORDINATOR message was received. "
             "Restarting election."
@@ -247,8 +271,7 @@ class BullyElection:
         self.start_election()
 
     def _become_leader(self, generation: int) -> None:
-
-
+        # Declares this process the leader and announces it to everyone
         with self._lock:
             if generation != self._election_generation:
                 return
@@ -271,7 +294,8 @@ class BullyElection:
         self._notify_leader_change(self.process_id)
 
     def handle_leader_failure(self) -> None:
-
+        # Called when the current leader is detected as unreachable (via heartbeat timeout);
+        # clears the leader state and triggers a fresh election.
         with self._lock:
             failed_leader = self.leader_id
             self.leader_id = None
@@ -285,8 +309,8 @@ class BullyElection:
         self.start_election()
 
     def set_leader(self, leader_id: int) -> None:
-
-
+        # Directly adopts a leader learned from another source (a PEER_LIST message from the leader itself),
+        #  without running a full election.
         with self._lock:
             if self.leader_id == leader_id:
                 return
@@ -303,12 +327,13 @@ class BullyElection:
         self._notify_leader_change(leader_id)
 
     def get_leader(self) -> int | None:
-
-
+        # Thread-safe read of the currently known leader ID
         with self._lock:
             return self.leader_id
 
     def _notify_leader_change(self, leader_id: int) -> None:
+        # Invokes the external callback (if any) whenever the leader changes,
+        # guarding against exceptions raised by that callback.
         if self.on_leader_change is None:
             return
 
