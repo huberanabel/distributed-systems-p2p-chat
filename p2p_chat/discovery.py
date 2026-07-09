@@ -7,7 +7,7 @@ from network import get_local_ip, get_subnet_broadcast_address
 
 
 DISCOVERY_PORT = 5973
-BROADCAST_IP = "255.255.255.255"
+BROADCAST_IP = "10.42.106.255"
 ANNOUNCEMENT_INTERVAL = 5  # Seconds between repeated discovery broadcasts
 
 
